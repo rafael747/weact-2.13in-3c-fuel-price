@@ -1,6 +1,7 @@
 substitutions:
-  sleep_time: 60min # normal sleep time
-  night_sleep_time: 150min # 1st sleep time after midnight
+  sleep_time: 60min # daytime sleep
+  low_battery_voltage: "3.30" # skip the fetch below this
+  low_battery_sleep: 6h
   latitude: !secret latitude
   longitude: !secret longitude
   postalcode: !secret postalcode
@@ -10,16 +11,19 @@ esphome:
   name: weact-213in-3c-fuel-price
   friendly_name: weact-2.13in-3c-fuel-price
   name_add_mac_suffix: false
-  includes: 
-   - utils.h
+  includes:
+    - utils.h
   on_boot:
-    priority: 900
-    then:
-      - lambda: |-
-          id(wake_up_reason) = esp_sleep_get_wakeup_cause();
+    - priority: 900
+      then:
+        - lambda: |-
+            id(wake_up_reason) = esp_sleep_get_wakeup_cause();
+    - priority: -100
+      then:
+        - script.execute: wifi_give_up
 
 deep_sleep:
-  run_duration: 2min #fallback if deep_sleep.enter fails
+  run_duration: 3min # backstop if deep_sleep.enter never runs
   sleep_duration: ${sleep_time}
   id: deep_sleep_1
 
@@ -32,27 +36,73 @@ globals:
   - id: wake_up_reason
     type: int
     restore_value: no
-    initial_value: '0'  
+    initial_value: '0'
+  - id: fetch_ok
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: should_refresh
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: cycle_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Last prices survive deep sleep so an unchanged board can skip the panel.
+  - id: saved_diesel
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: saved_e5
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: saved_e10
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: saved_name_hash
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  # Successful fetches with the same prices. Refresh is forced at 3.
+  - id: wakes_since_refresh
+    type: int
+    restore_value: yes
+    initial_value: '0'
 
-# Enable logging
+# UART off while asleep-capable; API logs still work during the awake window.
 logger:
+  baud_rate: 0
 
 # Enable Home Assistant API
 api:
+  reboot_timeout: 0s
 
 # Allow Over-The-Air updates
 ota:
-- platform: esphome
+  - platform: esphome
 
 wifi:
   id: wifi_id
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   use_address: 192.168.0.246
+  fast_connect:
+    enabled: true
+    storage: rtc
+  power_save_mode: high
+  post_connect_roaming: false
+  reboot_timeout: 0s
   on_connect:
     then:
-      - logger.log: "WiFi connected, starting work"
-      - script.execute: do_work
+      - if:
+          condition:
+            lambda: 'return !id(cycle_done);'
+          then:
+            - logger.log: "WiFi connected, starting work"
+            - script.execute: do_work
 
 spi:
   clk_pin:
@@ -61,6 +111,7 @@ spi:
   miso_pin: GPIO19 # Standard ESP32 hardware SPI
 
 http_request:
+  timeout: 10s
 
 sensor:
   - platform: adc
