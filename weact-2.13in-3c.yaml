@@ -143,76 +143,177 @@ time:
         - logger.log: "Synchronized system clock"
 
 script:
-  - id: do_work
+  - id: wifi_give_up
+    mode: single
     then:
-      - delay: 2s
-      - logger.log:
-          format: "do_work start, wake=%d, wifi=%d"
-          args: ['id(wake_up_reason)', 'id(wifi_id).is_connected()']
-      - component.update: sntp_time
-      - wait_until:
+      - delay: 45s
+      - if:
           condition:
-            time.has_time:
-          timeout: 30s
-      - component.update: battery_voltage
-      - component.update: battery_percentage
-      - logger.log: "Getting fuel prices from API"
-      - http_request.get:
-          url: https://creativecommons.tankerkoenig.de/api/v4/stations/postalcode?apikey=${apikey}&postalcode=${postalcode}
-          request_headers:
-            Content-Type: application/json
-          capture_response: true
-          max_response_buffer_size: 16384
-          on_response:
-            then:
-              - logger.log:
-                    format: "Response status: %d"
-                    args: [ 'response->status_code' ]
-              - lambda: |-
-                  json::parse_json(body, [](JsonObject root) -> bool {
-                      parseStationData(root);
-                      return 0;
-                  });
-          on_error:
-            then:
-              - logger.log: "HTTP request failed (connect/TLS/timeout)"
-      - component.update: weact_display
-      - wait_until:
-          condition:
-            not:
-              epaper_spi.is_updating:
-                id: weact_display
-          timeout: 60s
-      - script.execute: enter_sleep
+            or:
+              - lambda: 'return id(cycle_done);'
+              - script.is_running:
+                  id: do_work
+              - script.is_running:
+                  id: enter_sleep
+          then:
+            - logger.log: "Work is underway, leaving the run_duration backstop"
+          else:
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - logger.log: "WiFi is up but work never started, starting it"
+                  - script.execute: do_work
+                else:
+                  - logger.log: "WiFi did not connect, sleeping"
+                  - script.execute: enter_sleep
 
-  - id: enter_sleep
+  - id: do_work
+    mode: single
     then:
       - if:
           condition:
-            lambda: 'return id(wake_up_reason) != 4;' # Didn't wake up because of timer(4) (0 -> new boot, 3 -> button)
+            lambda: 'return id(cycle_done);'
+          then:
+            - logger.log: "Ignoring do_work, cycle already ending"
+          else:
+            - logger.log:
+                format: "do_work start, wake=%d, wifi=%d"
+                args: ['id(wake_up_reason)', 'id(wifi_id).is_connected()']
+            - lambda: |-
+                id(fetch_ok) = false;
+                id(should_refresh) = false;
+            - component.update: sntp_time
+            - wait_until:
+                condition:
+                  time.has_time:
+                    id: sntp_time
+                timeout: 15s
+            - component.update: battery_voltage
+            - component.update: battery_percentage
+            - if:
+                condition:
+                  lambda: |-
+                    const float v = id(battery_voltage).state;
+                    return !isnan(v) && v > 0.5f && v < ${low_battery_voltage}f;
+                then:
+                  - logger.log:
+                      format: "Battery %.2f V is low, skipping fetch"
+                      args: ['id(battery_voltage).state']
+                  - script.execute: enter_sleep
+                else:
+                  - logger.log: "Getting fuel prices from API"
+                  - http_request.get:
+                      url: https://creativecommons.tankerkoenig.de/api/v4/stations/postalcode?apikey=${apikey}&postalcode=${postalcode}
+                      request_headers:
+                        Content-Type: application/json
+                      capture_response: true
+                      max_response_buffer_size: 16384
+                      on_response:
+                        then:
+                          - logger.log:
+                              format: "Response status: %d"
+                              args: ['response->status_code']
+                          - lambda: |-
+                              id(fetch_ok) = false;
+                              if (response->status_code != 200) {
+                                return;
+                              }
+                              bool parsed = json::parse_json(body, [](JsonObject root) -> bool {
+                                parseStationData(root);
+                                return true;
+                              });
+                              id(fetch_ok) = parsed && bestStation.diesel_price > 0.0f && bestStation.diesel_price < 90.0f;
+                      on_error:
+                        then:
+                          - logger.log: "HTTP request failed (connect/TLS/timeout)"
+                  - if:
+                      condition:
+                        lambda: 'return id(fetch_ok);'
+                      then:
+                        - lambda: |-
+                            RefreshPlan plan = planDisplayRefresh(
+                                id(saved_diesel), id(saved_e5), id(saved_e10),
+                                id(saved_name_hash), id(wakes_since_refresh));
+                            id(saved_diesel) = plan.diesel;
+                            id(saved_e5) = plan.e5;
+                            id(saved_e10) = plan.e10;
+                            id(saved_name_hash) = plan.name_hash;
+                            id(wakes_since_refresh) = plan.wakes_since_refresh;
+                            id(should_refresh) = plan.refresh;
+                      else:
+                        - logger.log: "Fetch failed, keeping the current image"
+                  - if:
+                      condition:
+                        lambda: 'return id(should_refresh);'
+                      then:
+                        - if:
+                            condition:
+                              lambda: 'return id(wake_up_reason) == 4;'
+                            then:
+                              - logger.log: "Disabling WiFi before display refresh"
+                              - wifi.disable:
+                        - component.update: weact_display
+                        - wait_until:
+                            condition:
+                              not:
+                                epaper_spi.is_updating:
+                                  id: weact_display
+                            timeout: 40s
+                      else:
+                        - logger.log: "Skipping display refresh"
+                        - if:
+                            condition:
+                              lambda: 'return id(wake_up_reason) == 4;'
+                            then:
+                              - wifi.disable:
+                  - script.execute: enter_sleep
+
+  - id: enter_sleep
+    mode: single
+    then:
+      - lambda: 'id(cycle_done) = true;'
+      - if:
+          condition:
+            and:
+              # 4 is the timer. 0 is a fresh boot, 3 is a button. Keep Wi-Fi up so OTA can land.
+              - lambda: 'return id(wake_up_reason) != 4;'
+              - wifi.connected:
           then:
             - logger.log:
                 format: "wake_up_reason: %d, waiting extra 25s"
-                args: [id(wake_up_reason)]
+                args: ['id(wake_up_reason)']
             - delay: 25s
       - if:
           condition:
-            lambda: |- 
-              auto time = id(sntp_time).now();
-              if (!time.is_valid()) { 
-                return false;
-              }
-              return (time.hour < 6); 
+            lambda: |-
+              const float v = id(battery_voltage).state;
+              return !isnan(v) && v > 0.5f && v < ${low_battery_voltage}f;
           then:
-            - logger.log: "It's nighttime, entering long sleep for ${night_sleep_time}"          
-            - deep_sleep.enter: 
-                id: deep_sleep_1 
-                sleep_duration: ${night_sleep_time}
+            - logger.log:
+                format: "Battery %.2f V is low, sleeping ${low_battery_sleep}"
+                args: ['id(battery_voltage).state']
+            - deep_sleep.enter:
+                id: deep_sleep_1
+                sleep_duration: ${low_battery_sleep}
           else:
-            - logger.log: "It's daytime, entering short sleep for ${sleep_time}"             
-            - deep_sleep.enter: 
-                id: deep_sleep_1 
-                sleep_duration: ${sleep_time}
+            - if:
+                condition:
+                  and:
+                    - time.has_time:
+                        id: sntp_time
+                    - lambda: 'return id(sntp_time).now().hour < 6;'
+                then:
+                  - logger.log: "It's nighttime, sleeping until 06:00"
+                  - deep_sleep.enter:
+                      id: deep_sleep_1
+                      until: "06:00:00"
+                      time_id: sntp_time
+                else:
+                  - logger.log: "It's daytime, sleeping for ${sleep_time}"
+                  - deep_sleep.enter:
+                      id: deep_sleep_1
+                      sleep_duration: ${sleep_time}
 
 font:
   - file: 'fonts/GoogleSans-Regular.ttf'
