@@ -97,7 +97,7 @@ script:
       - delay: 2s
       - logger.log:
           format: "do_work start, wake=%d, wifi=%d"
-          args: ['id(wake_up_reason)', 'id(wifi_id).is_connected()']  # use your wifi id if set
+          args: ['id(wake_up_reason)', 'id(wifi_id).is_connected()']
       - component.update: sntp_time
       - wait_until:
           condition:
@@ -125,8 +125,6 @@ script:
           on_error:
             then:
               - logger.log: "HTTP request failed (connect/TLS/timeout)"
-
-    #  - delay: 2s
       - component.update: weact_display
       - wait_until:
           condition:
@@ -165,7 +163,6 @@ script:
                 id: deep_sleep_1 
                 sleep_duration: ${sleep_time}
 
-
 font:
   - file: 'fonts/GoogleSans-Regular.ttf'
     id: font1
@@ -173,7 +170,6 @@ font:
   - file: 'fonts/GoogleSans-Bold.ttf'
     id: font_bold
     size: 20
-#  - file: 'fonts/SevenSegment.ttf'
   - file: 'fonts/7segment.ttf'
     id: numbers
     size: 40
@@ -221,7 +217,6 @@ display:
       it.printf(xres/3.5, y+24, id(numbers), RED, "%.3f", bestStation.diesel_price);
 
 
-
       y+=65;
 
       it.rectangle(0, y, xres, 66, BLACK);
@@ -238,14 +233,7 @@ display:
 
       //fotter
 
-      //it.print(0,yres-45, id(font1), BLACK, TextAlign::TOP_LEFT, "Updated at");
-
       it.line(0, yres-22, xres, yres-22, BLACK);
-
-      //it.strftime(xres/2, yres-23, id(font1), BLACK, TextAlign::TOP_CENTER, "%b %d, %H:%M", id(sntp_time).now());
 
       it.strftime(0, yres-23, id(font1), BLACK, TextAlign::TOP_LEFT, "%H:%M", id(sntp_time).now());
       it.printf(xres, yres-23, id(font1), BLACK, TextAlign::TOP_RIGHT, "%.2f,%.0f", id(battery_voltage).state,id(battery_percentage).state);
-
-
-
