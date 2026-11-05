@@ -1,0 +1,15 @@
+services:
+  esphome:
+    container_name: weact-2.13in-3c-esphome
+    image: ghcr.io/esphome/esphome:2026.10
+    volumes:
+      - .:/config
+      - ./.cache:/cache
+    ports:
+      - "6052:6052"
+    environment:
+      - ESPHOME_DASHBOARD_USE_PING=true
+      - PLATFORMIO_CORE_DIR=/cache
+    # Docker Desktop on macOS does not support host networking or USB passthrough.
+    # Use the dashboard at http://localhost:6052 and flash via OTA / Web Serial.
+    restart: unless-stopped
